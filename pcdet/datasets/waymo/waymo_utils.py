@@ -20,6 +20,109 @@ except:
 WAYMO_CLASSES = ['unknown', 'Vehicle', 'Pedestrian', 'Sign', 'Cyclist']
 
 
+def cart_to_homo(mat):
+    """Convert transformation matrix in Cartesian coordinates to
+    homogeneous format.
+
+    Args:
+        mat (np.ndarray): Transformation matrix in Cartesian.
+            The input matrix shape is 3x3 or 3x4.
+
+    Returns:
+        np.ndarray: Transformation matrix in homogeneous format.
+            The matrix shape is 4x4.
+    """
+    ret = np.eye(4)
+    if mat.shape == (3, 3):
+        ret[:3, :3] = mat
+    elif mat.shape == (3, 4):
+        ret[:3, :] = mat
+    else:
+        raise ValueError(mat.shape)
+    return ret
+
+
+def generate_image_labels(frame, cnt, cur_save_dir,):
+    camera_labels = frame.camera_labels
+    frame_context = frame.context
+    image_dir = os.path.join(str(cur_save_dir).split('waymo_processed_data_v0_5_0/')[-1], 
+                             f'image/{str(cnt).zfill(4)}')
+    
+    # waymo front camera to kitti reference camera
+    T_front_cam_to_ref = np.array([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0],
+                                    [1.0, 0.0, 0.0]])
+    
+    # 每个视角循环
+    cam_info, annos_2d = {}, {}
+    cam2img_mats, lidar2cam_mats, lidar2img_mats = [], [], []
+    rolling_shutter_direction, image_shape, image_paths = [], [], []
+    for view_idx in range(len(camera_labels)): # i表示每个相机，0，1，2，3，4
+        view_labels = camera_labels[view_idx]
+        
+        # 图像路径
+        image_path = image_dir + f'/{view_idx}.jpg'
+        image_paths.append(image_path)
+        
+        # 获得当前视角的内外参矩阵
+        cam_calib = frame_context.camera_calibrations[view_idx]
+        # extrinsic
+        T_cam_to_vehicle = np.array(cam_calib.extrinsic.transform).reshape(4, 4) # cam to vehicle
+        T_vehicle_to_cam = np.linalg.inv(T_cam_to_vehicle) # vehicle to cam
+        cam_extrinsic = cart_to_homo(T_front_cam_to_ref) @ T_vehicle_to_cam # lidar to cam
+        # intrinsic
+        cam_intrinsic = np.zeros((3, 4))
+        cam_intrinsic[0, 0] = cam_calib.intrinsic[0]
+        cam_intrinsic[1, 1] = cam_calib.intrinsic[1]
+        cam_intrinsic[0, 2] = cam_calib.intrinsic[2]
+        cam_intrinsic[1, 2] = cam_calib.intrinsic[3]
+        cam_intrinsic[2, 2] = 1
+        # lidar --> img
+        lidar2img_mat = cam_intrinsic @ cam_extrinsic
+        
+        cam2img_mats.append(cam_intrinsic.astype(np.float32))
+        lidar2cam_mats.append(cam_extrinsic.astype(np.float32))
+        lidar2img_mats.append(lidar2img_mat.astype(np.float32))
+        
+        rolling_shutter_direction.append(cam_calib.rolling_shutter_direction)
+        
+        # 获得当前视角的img size
+        width = cam_calib.width
+        height = cam_calib.height
+        image_shape.append((width, height))
+        
+        # 单个视角内循环，对应每个实例的标签
+        obj_names, obj_boxes, obj_ids = [], [], []
+        for label in view_labels.labels:
+            center_x, center_y = label.box.center_x, label.box.center_y
+            width, height = label.box.length, label.box.width
+            obj_boxes.append([center_x, center_y, width, height])
+            obj_names.append(WAYMO_CLASSES[label.type]) # 1:vehicle, 2:pedestrain, 4:cyclist
+            obj_ids.append(label.id) # 跟踪标识
+        annos_2d[view_idx] = {
+            'obj_boxes': np.array(obj_boxes),
+            'obj_names': np.array(obj_names),
+            'obj_ids': np.array(obj_ids),
+        }
+    
+    cam_info = {
+        'img_path': image_paths,
+        'annos_2d': annos_2d,
+        # 'obj_names': np.array(obj_names),
+        # 'obj_boxes': np.array(obj_boxes),
+        # 'obj_ids': np.array(obj_ids),
+        # 'cam2img': cam_intrinsic.astype(np.float32),
+        # 'lidar2cam': cam_extrinsic.astype(np.float32),
+        # 'lidar2img': lidar2img_mat.astype(np.float32),
+        'cam2img': cam2img_mats,
+        'lidar2cam': lidar2cam_mats,
+        'lidar2img': lidar2img_mats,
+        'image_shape': image_shape,
+        'rolling_shutter_direction': rolling_shutter_direction,
+    }
+        
+    return cam_info
+
+
 def generate_labels(frame, pose):
     obj_name, difficulty, dimensions, locations, heading_angles = [], [], [], [], []
     tracking_difficulty, speeds, accelerations, obj_ids = [], [], [], []
@@ -56,6 +159,12 @@ def generate_labels(frame, pose):
 
     annotations = common_utils.drop_info_with_name(annotations, name='unknown')
     if annotations['name'].__len__() > 0:
+        
+        # acqurie a instance for each category per frame, coin setting
+        _, unique_indices = np.unique(annotations['name'], return_index=True)
+        for key in annotations.keys():
+            annotations[key] = annotations[key][unique_indices]
+        
         global_speed = np.pad(annotations['speed_global'], ((0, 0), (0, 1)), mode='constant', constant_values=0)  # (N, 3)
         speed = np.dot(global_speed, np.linalg.inv(pose[:3, :3].T))
         speed = speed[:, :2]
@@ -166,8 +275,8 @@ def convert_range_image_to_point_cloud(frame, range_images, camera_projections, 
     return points, cp_points, points_NLZ, points_intensity, points_elongation
 
 
-def save_lidar_points(frame, cur_save_path, use_two_returns=True):
-    ret_outputs = frame_utils.parse_range_image_and_camera_projection(frame)
+def save_lidar_points(frame, cur_save_path, use_two_returns=True, save_pts=True):
+    ret_outputs = frame_utils.parse_range_image_and_camera_projection(frame) # 读取一帧，并输出三个内容
     if len(ret_outputs) == 4:
         range_images, camera_projections, seg_labels, range_image_top_pose = ret_outputs
     else:
@@ -180,19 +289,35 @@ def save_lidar_points(frame, cur_save_path, use_two_returns=True):
 
     # 3d points in vehicle frame.
     points_all = np.concatenate(points, axis=0)
-    points_in_NLZ_flag = np.concatenate(points_in_NLZ_flag, axis=0).reshape(-1, 1)
+    points_in_NLZ_flag = np.concatenate(points_in_NLZ_flag, axis=0).reshape(-1, 1) # ？
     points_intensity = np.concatenate(points_intensity, axis=0).reshape(-1, 1)
-    points_elongation = np.concatenate(points_elongation, axis=0).reshape(-1, 1)
+    points_elongation = np.concatenate(points_elongation, axis=0).reshape(-1, 1) # ？
 
     num_points_of_each_lidar = [point.shape[0] for point in points]
     save_points = np.concatenate([
-        points_all, points_intensity, points_elongation, points_in_NLZ_flag
+        points_all, points_intensity, points_elongation, points_in_NLZ_flag  # 点云维度构成
     ], axis=-1).astype(np.float32)
 
-    np.save(cur_save_path, save_points)
+    if save_pts:
+        np.save(cur_save_path, save_points)
     # print('saving to ', cur_save_path)
     return num_points_of_each_lidar
 
+
+def save_image(frame, cnt, cur_save_dir):
+    cur_img_dir = os.path.join(cur_save_dir, 
+                                'image',
+                                ('%04d' % int(cnt)))
+    
+    os.makedirs(cur_img_dir, exist_ok=True)
+
+    for i, img in enumerate(frame.images): # len = 5
+        # img_path = f'{cur_save_dir}/' + f'image_{img.name-1}'        
+        # img_name = img_path + f'/{str(frame_id).zfill(4)}.jpg'
+        img_name = cur_img_dir + f'/{i}.jpg'
+        with open(img_name, 'wb') as fp:
+            fp.write(img.image)
+    
 
 def process_single_sequence(sequence_file, save_path, sampled_interval, has_label=True, use_two_returns=True, update_info_only=False):
     sequence_name = os.path.splitext(os.path.basename(sequence_file))[0]
@@ -202,10 +327,11 @@ def process_single_sequence(sequence_file, save_path, sampled_interval, has_labe
         print('NotFoundError: %s' % sequence_file)
         return []
 
-    dataset = tf.data.TFRecordDataset(str(sequence_file), compression_type='')
+    dataset = tf.data.TFRecordDataset(str(sequence_file), compression_type='')  # 官方api，初始化数据集
     cur_save_dir = save_path / sequence_name
     cur_save_dir.mkdir(parents=True, exist_ok=True)
-    pkl_file = cur_save_dir / ('%s.pkl' % sequence_name)
+    # pkl_file = cur_save_dir / ('%s.pkl' % sequence_name)  # 为每个tfcord保存一个pkl
+    pkl_file = cur_save_dir / f'{sequence_name}_2%.pkl'  # 为每个tfcord保存一个pkl
 
     sequence_infos = []
     if pkl_file.exists():
@@ -234,12 +360,16 @@ def process_single_sequence(sequence_file, save_path, sampled_interval, has_labe
             'context_name': frame.context.name,
             'timestamp_micros': frame.timestamp_micros
         }
-        image_info = {}
-        for j in range(5):
-            width = frame.context.camera_calibrations[j].width
-            height = frame.context.camera_calibrations[j].height
-            image_info.update({'image_shape_%d' % j: (height, width)})
-        info['image'] = image_info
+        # image_info = {}
+        # for j in range(5):
+        #     width = frame.context.camera_calibrations[j].width
+        #     height = frame.context.camera_calibrations[j].height
+        #     # print('=======', frame.context)
+        #     image_info.update({'image_shape_%d' % j: (height, width)})
+        cam_info = generate_image_labels(frame, cnt, cur_save_dir)
+        info['image'] = cam_info
+        
+        # save_image(frame, cnt, cur_save_dir)
 
         pose = np.array(frame.pose.transform, dtype=np.float32).reshape(4, 4)
         info['pose'] = pose
@@ -253,7 +383,7 @@ def process_single_sequence(sequence_file, save_path, sampled_interval, has_labe
             num_points_of_each_lidar = sequence_infos_old[cnt]['num_points_of_each_lidar']
         else:
             num_points_of_each_lidar = save_lidar_points(
-                frame, cur_save_dir / ('%04d.npy' % cnt), use_two_returns=use_two_returns
+                frame, cur_save_dir / ('%04d.npy' % cnt), use_two_returns=use_two_returns, save_pts=False
             )
         info['num_points_of_each_lidar'] = num_points_of_each_lidar
 
@@ -264,5 +394,3 @@ def process_single_sequence(sequence_file, save_path, sampled_interval, has_labe
 
     print('Infos are saved to (sampled_interval=%d): %s' % (sampled_interval, pkl_file))
     return sequence_infos
-
-
