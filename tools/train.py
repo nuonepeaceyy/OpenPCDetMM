@@ -17,6 +17,9 @@ from pcdet.utils import common_utils
 from train_utils.optimization import build_optimizer, build_scheduler
 from train_utils.train_utils import train_model
 
+import warnings
+warnings.filterwarnings("ignore")
+
 
 def parse_config():
     parser = argparse.ArgumentParser(description='arg parser')
@@ -24,7 +27,7 @@ def parse_config():
 
     parser.add_argument('--batch_size', type=int, default=None, required=False, help='batch size for training')
     parser.add_argument('--epochs', type=int, default=None, required=False, help='number of epochs to train for')
-    parser.add_argument('--workers', type=int, default=4, help='number of workers for dataloader')
+    parser.add_argument('--workers', type=int, default=8, help='number of workers for dataloader')
     parser.add_argument('--extra_tag', type=str, default='default', help='extra tag for this experiment')
     parser.add_argument('--ckpt', type=str, default=None, help='checkpoint to start from')
     parser.add_argument('--pretrained_model', type=str, default=None, help='pretrained_model')
@@ -41,7 +44,8 @@ def parse_config():
 
     parser.add_argument('--max_waiting_mins', type=int, default=0, help='max waiting minutes')
     parser.add_argument('--start_epoch', type=int, default=0, help='')
-    parser.add_argument('--num_epochs_to_eval', type=int, default=0, help='number of checkpoints to be evaluated')
+    parser.add_argument('--num_epochs_to_eval', type=int, default=30, help='number of checkpoints to be evaluated')
+    parser.add_argument('--out_dir', type=str, default=None, help='specify the output in training')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
     
     parser.add_argument('--use_tqdm_to_record', action='store_true', default=False, help='if True, the intermediate losses will not be logged to file, only tqdm will be used')
@@ -50,6 +54,8 @@ def parse_config():
     parser.add_argument('--wo_gpu_stat', action='store_true', help='')
     parser.add_argument('--use_amp', action='store_true', help='use mix precision training')
     
+    parser.add_argument('--use_text', action='store_true', default=False, help='use text data')
+    parser.add_argument('--ratio_sample', type=float, default=1.0, help='ratio to downsample the dataset')
 
     args = parser.parse_args()
 
@@ -90,7 +96,11 @@ def main():
     if args.fix_random_seed:
         common_utils.set_random_seed(666 + cfg.LOCAL_RANK)
 
-    output_dir = cfg.ROOT_DIR / 'output' / cfg.EXP_GROUP_PATH / cfg.TAG / args.extra_tag
+    if args.out_dir is None:
+        output_dir = cfg.ROOT_DIR / 'output' / cfg.EXP_GROUP_PATH / cfg.TAG / args.extra_tag
+    else:
+        output_dir = cfg.ROOT_DIR / 'output' / args.out_dir / args.extra_tag
+        
     ckpt_dir = output_dir / 'ckpt'
     output_dir.mkdir(parents=True, exist_ok=True)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -126,7 +136,9 @@ def main():
         training=True,
         merge_all_iters_to_one_epoch=args.merge_all_iters_to_one_epoch,
         total_epochs=args.epochs,
-        seed=666 if args.fix_random_seed else None
+        seed=666 if args.fix_random_seed else None,
+        use_text=args.use_text,
+        ratio_sample=args.ratio_sample
     )
 
     model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=train_set)
