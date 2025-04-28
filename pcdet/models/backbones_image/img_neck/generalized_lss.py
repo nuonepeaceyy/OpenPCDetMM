@@ -73,4 +73,5 @@ class GeneralizedLSSFPN(nn.Module):
         # build outputs
         outs = [laterals[i] for i in range(used_backbone_levels)]
         batch_dict['image_fpn'] = tuple(outs)
+        breakpoint()
         return batch_dict

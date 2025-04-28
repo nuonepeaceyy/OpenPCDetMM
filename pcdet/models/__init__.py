@@ -32,6 +32,8 @@ def load_data_to_gpu(batch_dict):
             batch_dict[key] = kornia.image_to_tensor(val).float().cuda().contiguous()
         elif key in ['image_shape']:
             batch_dict[key] = torch.from_numpy(val).int().cuda()
+        elif key in ['category_caption',]:
+            continue
         else:
             batch_dict[key] = torch.from_numpy(val).float().cuda()
 

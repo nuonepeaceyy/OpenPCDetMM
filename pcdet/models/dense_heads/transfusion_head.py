@@ -224,9 +224,9 @@ class TransFusionHead(nn.Module):
             bboxes = self.get_bboxes(res)
             batch_dict['final_box_dicts'] = bboxes
         else:
-            gt_boxes = batch_dict['gt_boxes']
-            gt_bboxes_3d = gt_boxes[...,:-1]
-            gt_labels_3d =  gt_boxes[...,-1].long() - 1
+            gt_boxes = batch_dict['gt_boxes']  # [batch_size, N, 10]: x, y, z, w, l, h, ry, vx, vy, class_idx
+            gt_bboxes_3d = gt_boxes[...,:-1]  # [batch_size, N, 9]
+            gt_labels_3d =  gt_boxes[...,-1].long() - 1  # [batch_size, class_idx]
             loss, tb_dict = self.loss(gt_bboxes_3d, gt_labels_3d, res)
             batch_dict['loss'] = loss
             batch_dict['tb_dict'] = tb_dict
@@ -234,15 +234,15 @@ class TransFusionHead(nn.Module):
 
     def get_targets(self, gt_bboxes_3d, gt_labels_3d, pred_dicts):
         assign_results = []
-        for batch_idx in range(len(gt_bboxes_3d)):
+        for batch_idx in range(len(gt_bboxes_3d)):  # len(gt_bboxes_3d) == batch_size，针对每个batch循环
             pred_dict = {}
             for key in pred_dicts.keys():
-                pred_dict[key] = pred_dicts[key][batch_idx : batch_idx + 1]
+                pred_dict[key] = pred_dicts[key][batch_idx : batch_idx + 1]  # 获取每个batch的预测结果
             gt_bboxes = gt_bboxes_3d[batch_idx]
             valid_idx = []
             # filter empty boxes
             for i in range(len(gt_bboxes)):
-                if gt_bboxes[i][3] > 0 and gt_bboxes[i][4] > 0:
+                if gt_bboxes[i][3] > 0 and gt_bboxes[i][4] > 0:  # w, l > 0
                     valid_idx.append(i)
             assign_result = self.get_targets_single(gt_bboxes[valid_idx], gt_labels_3d[batch_idx][valid_idx], pred_dict)
             assign_results.append(assign_result)
@@ -261,7 +261,7 @@ class TransFusionHead(nn.Module):
     def get_targets_single(self, gt_bboxes_3d, gt_labels_3d, preds_dict):
         
         num_proposals = preds_dict["center"].shape[-1]
-        score = copy.deepcopy(preds_dict["heatmap"].detach())
+        score = copy.deepcopy(preds_dict["heatmap"].detach())  # deepcopy().detach() is used to avoid gradient calculation
         center = copy.deepcopy(preds_dict["center"].detach())
         height = copy.deepcopy(preds_dict["height"].detach())
         dim = copy.deepcopy(preds_dict["dim"].detach())
@@ -271,7 +271,7 @@ class TransFusionHead(nn.Module):
         else:
             vel = None
 
-        boxes_dict = self.decode_bbox(score, rot, dim, center, height, vel)
+        boxes_dict = self.decode_bbox(score, rot, dim, center, height, vel)  # 解码出每个proposal的3D边界框
         bboxes_tensor = boxes_dict[0]["pred_boxes"]
         gt_bboxes_tensor = gt_bboxes_3d.to(score.device)
 
@@ -395,18 +395,20 @@ class TransFusionHead(nn.Module):
         return targets
 
     def decode_bbox(self, heatmap, rot, dim, center, height, vel, filter=False):
-        
+        "将预测(proposal)的中心点、尺寸、旋转角度等解码为3D边界框"
         post_process_cfg = self.model_cfg.POST_PROCESSING
         score_thresh = post_process_cfg.SCORE_THRESH
         post_center_range = post_process_cfg.POST_CENTER_RANGE
         post_center_range = torch.tensor(post_center_range).cuda().float()
         # class label
-        final_preds = heatmap.max(1, keepdims=False).indices
-        final_scores = heatmap.max(1, keepdims=False).values
+        final_preds = heatmap.max(1, keepdims=False).indices  # [batch_size, num_proposals] 每个proposal的类别
+        final_scores = heatmap.max(1, keepdims=False).values  # [batch_size, num_proposals] 每个proposal的分数
 
+        # center[:, 0, :] * self.feature_map_stride: 网格坐标->体素坐标；
+        # * self.voxel_size[0] + self.point_cloud_range[0]: 体素坐标->点云坐标
         center[:, 0, :] = center[:, 0, :] * self.feature_map_stride * self.voxel_size[0] + self.point_cloud_range[0]
         center[:, 1, :] = center[:, 1, :] * self.feature_map_stride * self.voxel_size[1] + self.point_cloud_range[1]
-        dim = dim.exp()
+        dim = dim.exp()  # 还原原始尺寸，模型预测的是log(w), log(l), log(h)
         rots, rotc = rot[:, 0:1, :], rot[:, 1:2, :]
         rot = torch.atan2(rots, rotc)
 

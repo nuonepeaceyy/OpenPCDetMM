@@ -13,7 +13,8 @@ from PIL import Image
 
 
 class NuScenesDataset(DatasetTemplate):
-    def __init__(self, dataset_cfg, class_names, training=True, root_path=None, logger=None):
+    def __init__(self, dataset_cfg, class_names, training=True, root_path=None, logger=None, 
+                 use_text=False, ratio_sample=1.0):
         root_path = (root_path if root_path is not None else Path(dataset_cfg.DATA_PATH)) / dataset_cfg.VERSION
         super().__init__(
             dataset_cfg=dataset_cfg, class_names=class_names, training=training, root_path=root_path, logger=logger
@@ -25,6 +26,9 @@ class NuScenesDataset(DatasetTemplate):
             self.camera_image_config = self.camera_config.IMAGE
         else:
             self.use_camera = False
+        
+        self.use_text = use_text
+        self.sample_interval = int(1.0 / ratio_sample)
 
         self.include_nuscenes_data(self.mode)
         if self.training and self.dataset_cfg.get('BALANCED_RESAMPLING', False):
@@ -43,6 +47,10 @@ class NuScenesDataset(DatasetTemplate):
                 nuscenes_infos.extend(infos)
 
         self.infos.extend(nuscenes_infos)
+        
+        if self.training:
+            self.infos = self.infos[::self.sample_interval]
+        
         self.logger.info('Total samples for NuScenes dataset: %d' % (len(nuscenes_infos)))
 
     def balanced_infos_resampling(self, infos):
@@ -242,6 +250,17 @@ class NuScenesDataset(DatasetTemplate):
             input_dict = self.load_camera_info(input_dict, info)
 
         data_dict = self.prepare_data(data_dict=input_dict)
+        
+        if self.use_text:
+            # seq_input_ids = info['sequence_caption']
+            cat_input_ids = info['category_caption']
+            # seq_input_ids = self.clip_processor(seq_input_ids, return_tensors="pt", padding=True).input_ids
+            # cat_input_ids = self.clip_processor(cat_input_ids, return_tensors="pt", padding=True).input_ids
+            
+            data_dict.update({
+            #    'seq_input_ids': seq_input_ids,
+                'category_caption': cat_input_ids
+            })
 
         if self.dataset_cfg.get('SET_NAN_VELOCITY_TO_ZEROS', False) and 'gt_boxes' in info:
             gt_boxes = data_dict['gt_boxes']
